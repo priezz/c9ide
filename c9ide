@@ -1,0 +1,189 @@
+#!/bin/bash
+
+
+## VERSION: 1.0.0
+
+#https://hub.docker.com/r/kdelfour/cloud9-docker/
+
+#git clone https://github.com/kdelfour/cloud9-docker
+#docker build --force-rm=true --tag="$USER/cloud9-docker:latest" .
+
+#if [ "$(archyve status | grep status: | awk '{print $3}')" == "stopped" ]; then
+	#echo Starting OSlix...
+	#archyve start
+	#sleep 20
+#fi
+#eval "$(archyve env)"
+
+#docker run -d -p 80:80 -p 3000:3000 -v $(pwd | sed 's/Users/home/')/:/workspace/ $USER/cloud9-docker:latest
+#echo Cloud9 IDE started at http://archyve.vm:80, use your web browser.
+# echo Cloud9 IDE started at http://archyve.vm:80, use your web browser.
+
+# export C9_HOSTNAME=localhost
+# export PORT=3000
+
+
+C9_PATH="${HOME}/.c9/ide"
+C9_APP="Cloud9 IDE"
+C9_BASH_BIN="bash"
+C9_IP="0.0.0.0"
+MIN_PORT=1025
+
+# -------------------------------------------------------------------------
+C9_REPO="git://github.com/c9/core.git"
+export C9_USER="priezz"
+export C9_EMAIL="a@priezz.net"
+
+declare workspace
+declare project
+declare port
+
+
+usageHelp() {
+	echo "
+Usage: c9ide workspace
+
+Options:
+  workspace       local directory, containing your project files;
+                  in case it does not exist c9ide will try to create it
+
+Dependencies:
+  realpath, node, npm
+
+c9ide 1.0 for OS X (https://gitlab.com/priezz/c9ide.git)
+	"
+}
+
+processParams() {
+	# Ensure that directory provided and exists, create it in other case
+	workspace="$(realpath $1 2> /dev/null)"
+	project=${workspace##*/}
+	mkdir -p "${workspace}" 2> /dev/null
+	[[ ( ! "${workspace}" ) || ( ! -d "${workspace}" ) ]] && return 1
+	return 0
+}
+
+checkRunning() {
+	# Check if IDE for the requested workspace is already running and return the port number if it is
+	port=$(ps aux | grep --color=never "${C9_PATH}/[s]erver.js -w ${workspace} " | head -1 | awk -F '--port' '{print $2}' | awk '{print $1}')
+}
+
+install() {
+	echo "Installing IDE..."
+	rm -rf "${C9_PATH}"
+	git clone "${C9_REPO}" "${C9_PATH}"
+	cd "${C9_PATH}" 2> /dev/null
+	scripts/install-sdk.sh
+}
+
+update() {
+	git pull origin master
+	scripts/install-sdk.sh
+}
+
+launchService() {
+	# Ensure that IDE is installed and is up to date
+	cd "${C9_PATH}" 2> /dev/null
+	if [[ ( $? -ne 0 ) || ( "$(git remote -v | grep origin | grep fetch | awk '{print $2}')" != "${C9_REPO}" ) ]]; then install; fi
+
+	# update C9 if already installed
+	update
+
+	# Find available port
+	local p
+	for p in $(seq $MIN_PORT 65000); do
+		echo -ne "\035" | telnet 127.0.0.1 $p > /dev/null 2>&1
+		[ $? -ne 0 ] && break
+	done
+	port=$p
+
+	tmp_dir="/tmp/cloud9.tmp/${port}"
+	mkdir -p "${tmp_dir}"
+
+	export PORT=$(( $port + 20000 ))
+	export IP="127.0.0.1"
+	#export METEOR_PORT=${PORT}
+	export C9_PORT=${port}
+	export HOSTNAME="${project}" # TODO: support ngrok here
+	export C9_HOSTNAME="127.0.0.1" # TODO: support ngrok here
+	export C9_PROJECT="${project}"
+	export C9_BASH_BIN="${C9_BASH_BIN}"
+	export C9_NODE_BIN="$(which node)"
+	export C9_TMUX_BIN="${tmp_dir}/tmux.sh"
+	#export C9_EDITOR="/tmp/cloud9.tmp/c9edit.sh"
+	export C9_NAME=$(git config --get user.name)
+	export C9_USER=$(whoami)
+	export C9_EMAIL=$(git config --get user.email)
+
+	#echo -e '#!/bin/bash\n'"$(which c9) open --wait"' "$@"' > "$C9_EDITOR"
+	#chmod +x "$C9_EDITOR"
+	#echo -e '#!/bin/bash\n'"IP=${IP} PORT=${PORT} HOSTNAME=${HOSTNAME} EDITOR=${C9_EDITOR} $(which tmux)"' "$@"' > "$C9_TMUX_BIN"
+	echo -e '#!/bin/sh\n'"$(which tmux) -S '${tmp_dir}/tmux.socket'"' "$@"' > "$C9_TMUX_BIN"
+	chmod +x "$C9_TMUX_BIN"
+
+	# echo port: $C9_PORT
+	# /usr/bin/env node -e 'console.log(process.env.C9_PORT)'
+
+	# Launch IDE web service
+	echo "Launching IDE web service at http://127.0.0.1:${port} ..."
+	cd "/tmp"
+	#"${C9_PATH}/../node/bin/node" "${C9_PATH}/server.js" -w "${workspace}" -s "../../settings/local-multi" -b --packed --collab --listen "${C9_IP}" --port $port --auth : > /dev/null &
+	nohup "${C9_PATH}/../node/bin/node" "${C9_PATH}/server.js" -w "${workspace}" -s "../../settings/local-multi" -b --packed --collab --listen "${C9_IP}" --port $port --auth : > /dev/null &
+	#"${C9_PATH}/../node/bin/node" "${C9_PATH}/server.js" -w "${workspace}" -s "../../settings/local-multi" -b --packed --collab --listen "${C9_IP}" --port $port --auth : &
+	# --domains localhost,c9.io
+}
+
+compileApp() {
+	# Check if 'nativefier'' is installed and up to date
+	if [[ ! "$(which nativefier)" ]]; then
+		echo Installing 'nativefier...'
+		npm install nativefier -g
+	# update if already installed
+	#else
+		#npm update -g nativefier
+	fi
+
+	# Compile and launch application
+	echo "Compiling application..."
+	tmp_dir="/tmp/cloud9.tmp/${port}"
+	#rm -rf "$(getAppPath)"
+	rm -rf "${tmp_dir}/Cloud9*"
+	mkdir -p "${tmp_dir}"
+	cd "${tmp_dir}"
+	electronVersion="$(npm show electron-prebuilt | grep latest | awk '{print $4}' | sed s/\'//g)"
+	#electronVersion="0.37.8"
+	echo "Using Electron v.${electronVersion}..."
+	nativefier --verbose --name "${C9_APP}" -i "${C9_PATH}/build/osx/c9.icns" -c --counter -e "${electronVersion}" -u "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2700.0 Safari/537.36" "http://127.0.0.1:${port}" --disable-context-menu --hide-window-frame &> /dev/null
+}
+
+#launchApp() {
+	#open "${C9_APP}-darwin-x64/${C9_APP}.app"
+#}
+
+getAppPath() {
+	echo "/tmp/cloud9.tmp/${port}/${C9_APP}-darwin-x64/${C9_APP}.app"
+}
+
+main() {
+	processParams $@
+    if [[ $? -ne 0 ]]; then
+		usageHelp
+		exit
+	fi
+	checkRunning
+	if [[ ! "$port" ]]; then
+		launchService
+		compileApp
+	else
+		echo "Cloud9 IDE service is already running..."
+	fi
+	local app="$(getAppPath)"
+	#[[ ! -d "${app}" ]] && compileApp
+	compileApp
+
+	open "$app"
+	# cd /tmp
+	# nohup "$app/Contents/MacOS/Electron" > /dev/null &
+}
+main $@
+
